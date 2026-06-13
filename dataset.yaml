@@ -1,0 +1,7 @@
+# Retail Vision Dataset Config 
+path: D:/retail_vision_data/SKU110K_fixed 
+train: images/train 
+val: images/val 
+test: images/test 
+nc: 1 
+names: ['object'] 
