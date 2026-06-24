@@ -1,7 +1,7 @@
 # fence.py
-# Day 4: Virtual Fence & Alert Logic
-# Purpose: Define zones on video feed and detect when objects cross boundaries
-# Impact: Core theft detection logic — knows WHEN and WHERE an object was taken
+# Day 4 & 5: Virtual Fence + Alert Logic + Database Integration
+# Purpose: Detect zones, trigger theft alerts, save to PostgreSQL
+# Impact: Core of the retail vision system
 
 import cv2
 import torch
@@ -10,18 +10,20 @@ import supervision as sv
 import numpy as np
 from collections import defaultdict
 import time
+import winsound
+import threading
+from database import init_db, log_detection, log_theft, start_session, end_session, check_product_status, mark_as_stolen
 
 # ── Configuration ────────────────────────────────────────────────────────────
 CONFIDENCE_THRESHOLD = 0.35
 IOU_THRESHOLD = 0.5
 MIN_BOX_AREA = 5000
 DISAPPEARANCE_THRESHOLD = 90
-MIN_SHELF_FRAMES = 60    # object must be on shelf for 2 seconds before tracking
+MIN_SHELF_FRAMES = 60
 
-# ── Zone definitions (will be set interactively) ──────────────────────────────
-# These are default values — we'll let user draw zones on first frame
+# ── Zone definitions ──────────────────────────────────────────────────────────
 SHELF_ZONE = np.array([[10, 10], [710, 10], [710, 200], [10, 200]])
-EXIT_ZONE = np.array([[10, 250], [710, 250], [710, 400], [10, 400]])
+EXIT_ZONE  = np.array([[10, 250], [710, 250], [710, 400], [10, 400]])
 
 # ── COCO retail classes ───────────────────────────────────────────────────────
 ALLOWED_CLASSES = {
@@ -43,36 +45,51 @@ RETAIL_CLASSES = {
     75: 'vase',       76: 'scissors',   77: 'teddy bear',
 }
 
+# ── Alarm Control (global) ────────────────────────────────────────────────────
+alarm_active = False
+alarm_thread = None
+alert_active = False
+alert_message = ""
+
+def play_alarm():
+    """Plays alarm sound in loop until stopped"""
+    global alarm_active
+    while alarm_active:
+        winsound.Beep(1000, 500)
+        winsound.Beep(1500, 500)
+        winsound.Beep(1000, 500)
+
+def start_alarm(name, tracker_id):
+    """Start alarm in background thread and set alert message"""
+    global alarm_active, alarm_thread, alert_active, alert_message
+    alert_active = True
+    alert_message = f"!! THEFT: {name} ID#{tracker_id} STOLEN !!"
+    if not alarm_active:
+        alarm_active = True
+        alarm_thread = threading.Thread(target=play_alarm, daemon=True)
+        alarm_thread.start()
+
+def stop_alarm():
+    """Stop alarm and clear alert message"""
+    global alarm_active, alert_active, alert_message
+    alarm_active = False
+    alert_active = False
+    alert_message = ""
+
+# ── Helper functions ──────────────────────────────────────────────────────────
 def get_class_name(class_id, confidence=None):
     if confidence is not None and confidence < 0.70:
         return 'object'
     return RETAIL_CLASSES.get(int(class_id), 'object')
 
 def get_center(xyxy):
-    """Get center point of a bounding box"""
     x1, y1, x2, y2 = xyxy
     return (int((x1 + x2) / 2), int((y1 + y2) / 2))
 
 def point_in_zone(point, zone):
-    """Check if a point is inside a polygon zone"""
     return cv2.pointPolygonTest(zone.astype(np.float32), point, False) >= 0
 
-def draw_zones(frame):
-    """Draw shelf and exit zones on frame"""
-    # Draw shelf zone (green)
-    cv2.polylines(frame, [SHELF_ZONE], True, (0, 255, 0), 2)
-    cv2.fillPoly(frame.copy(), [SHELF_ZONE], (0, 255, 0))
-    cv2.putText(frame, "SHELF ZONE", 
-                (SHELF_ZONE[0][0] + 5, SHELF_ZONE[0][1] + 25),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-
-    # Draw exit zone (red)
-    cv2.polylines(frame, [EXIT_ZONE], True, (0, 0, 255), 2)
-    cv2.putText(frame, "EXIT ZONE",
-                (EXIT_ZONE[0][0] + 5, EXIT_ZONE[0][1] + 25),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-    return frame
-
+# ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     print("=" * 50)
     print("RETAIL VISION - VIRTUAL FENCE")
@@ -80,44 +97,49 @@ def main():
 
     # ── 1. Load models ────────────────────────────────────────────────────
     print("Loading models...")
-    coco_model = YOLO('yolov8m.pt')
+    coco_model   = YOLO('yolov8m.pt')
     retail_model = YOLO('runs/train/retail_v1/weights/best.pt')
     print("Models loaded!")
 
-    # ── 2. Set up tracker and annotators ─────────────────────────────────
-    tracker = sv.ByteTrack()
-    box_annotator = sv.BoundingBoxAnnotator(thickness=2)
+    # ── 2. Tracker and annotators ─────────────────────────────────────────
+    tracker        = sv.ByteTrack()
+    box_annotator  = sv.BoundingBoxAnnotator(thickness=2)
     label_annotator = sv.LabelAnnotator(text_scale=0.5)
 
-    # ── 3. Open video source ──────────────────────────────────────────────
+    # ── 3. Open camera ────────────────────────────────────────────────────
     print("\nOpening video source...")
     print("Controls:")
     print("  'q' → quit")
-    print("  's' → take screenshot of current frame")
+    print("  's' → screenshot")
+    print("  'a' → acknowledge alert")
     print("=" * 50)
 
-    # Using video file for testing
     cap = cv2.VideoCapture(1)
     if not cap.isOpened():
         cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
-            print("ERROR: Could not open camera!")
-            return
-            
+    if not cap.isOpened():
+        print("ERROR: Could not open camera!")
+        return
     print("Webcam opened successfully!")
 
-    # ── 4. Tracking state ─────────────────────────────────────────────────
-    object_last_seen = defaultdict(int)
-    object_names = {}
-    object_zones = {}       # tracks which zone each object is in
-    alert_log = []
-    theft_log = []          # specifically theft alerts
-    frame_count = 0
-    object_shelf_frames = defaultdict(int)  # counts frames object spent on shelf
-    object_seen_on_shelf = set()            # objects that visited the shelf
-    already_alerted = set()                 # tracks objects already flagged
+    # ── 4. Database init ──────────────────────────────────────────────────
+    init_db()
+    session_id = start_session()
+    print("✅ Database connected!")
+    total_detections = 0
 
-    # ── 5. Main loop ──────────────────────────────────────────────────────
+    # ── 5. Tracking state ─────────────────────────────────────────────────
+    object_last_seen    = defaultdict(int)
+    object_names        = {}
+    object_zones        = {}
+    alert_log           = []
+    theft_log           = []
+    frame_count         = 0
+    object_shelf_frames = defaultdict(int)
+    object_seen_on_shelf = set()
+    already_alerted     = set()
+
+    # ── 6. Main loop ──────────────────────────────────────────────────────
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -126,8 +148,7 @@ def main():
         frame_count += 1
         display = frame.copy()
 
-        # ── 5a. Draw zones on frame ───────────────────────────────────────
-        # Shelf zone overlay (semi-transparent green)
+        # ── Draw zones ────────────────────────────────────────────────────
         overlay = display.copy()
         cv2.fillPoly(overlay, [SHELF_ZONE], (0, 255, 0))
         cv2.addWeighted(overlay, 0.15, display, 0.85, 0, display)
@@ -136,7 +157,6 @@ def main():
                     (SHELF_ZONE[0][0] + 5, SHELF_ZONE[0][1] + 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-        # Exit zone overlay (semi-transparent red)
         overlay2 = display.copy()
         cv2.fillPoly(overlay2, [EXIT_ZONE], (0, 0, 255))
         cv2.addWeighted(overlay2, 0.15, display, 0.85, 0, display)
@@ -145,7 +165,7 @@ def main():
                     (EXIT_ZONE[0][0] + 5, EXIT_ZONE[0][1] + 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
-        # ── 5b. Run detection ─────────────────────────────────────────────
+        # ── Run detection ─────────────────────────────────────────────────
         coco_results = coco_model(
             frame, conf=CONFIDENCE_THRESHOLD,
             iou=IOU_THRESHOLD, verbose=False
@@ -153,37 +173,31 @@ def main():
 
         detections = sv.Detections.from_ultralytics(coco_results)
 
-        # Filter tiny detections
         if len(detections) > 0:
             areas = (detections.xyxy[:, 2] - detections.xyxy[:, 0]) * \
                     (detections.xyxy[:, 3] - detections.xyxy[:, 1])
             detections = detections[areas > MIN_BOX_AREA]
 
-        # Filter non-retail classes
         if len(detections) > 0 and detections.class_id is not None:
             mask = np.array([c in ALLOWED_CLASSES for c in detections.class_id])
             detections = detections[mask]
 
-        # ── 5c. Run ByteTrack ─────────────────────────────────────────────
+        # ── ByteTrack ─────────────────────────────────────────────────────
         tracked = tracker.update_with_detections(detections)
 
-        # ── 5d. Update object registry and check zones ────────────────────
+        # ── Update registry and check zones ──────────────────────────────
         for i, tracker_id in enumerate(tracked.tracker_id):
             if tracker_id is None:
                 continue
 
             object_last_seen[tracker_id] = frame_count
 
-            # Get object name
             if tracker_id not in object_names:
                 class_id = tracked.class_id[i] if tracked.class_id is not None else -1
-                conf = tracked.confidence[i] if tracked.confidence is not None else None
+                conf     = tracked.confidence[i] if tracked.confidence is not None else None
                 object_names[tracker_id] = get_class_name(class_id, conf)
 
-            # Get center point of object
-            center = get_center(tracked.xyxy[i])
-
-            # Determine which zone object is in
+            center    = get_center(tracked.xyxy[i])
             prev_zone = object_zones.get(tracker_id, 'unknown')
 
             if point_in_zone(center, SHELF_ZONE):
@@ -193,100 +207,121 @@ def main():
             else:
                 current_zone = 'floor'
 
-            # Track if object was ever seen on shelf
             if current_zone == 'shelf':
                 object_shelf_frames[tracker_id] += 1
-                # Mark this object as "was on shelf"
                 object_seen_on_shelf.add(tracker_id)
 
-            # ── THEFT DETECTION LOGIC ─────────────────────────────────────────────
-            # Any object detected in exit zone = THEFT (nothing should be there)
-            if current_zone == 'exit':
-                if tracker_id not in already_alerted:
-                    name = object_names.get(tracker_id, 'object')
-                    alert_msg = f"🚨 THEFT ALERT: {name} (ID#{tracker_id}) detected in exit zone!"
-                    print(alert_msg)
+            # ── THEFT DETECTION ───────────────────────────────────────────
+            if current_zone == 'exit' and tracker_id not in already_alerted:
+                name   = object_names.get(tracker_id, 'object')
+                status = check_product_status(int(tracker_id))
 
+                if status == 'available':
+                    print(f"🚨 THEFT ALERT: {name} (ID#{tracker_id}) detected in exit zone!")
                     theft_log.append({
-                        'id': tracker_id,
+                        'id':   tracker_id,
                         'name': name,
                         'frame': frame_count,
                         'time': time.strftime('%H:%M:%S')
                     })
+                    already_alerted.add(tracker_id)
+                    mark_as_stolen(int(tracker_id))
+                    log_theft(name, tracker_id, frame_count)
+                    start_alarm(name, tracker_id)   # ← passes name & id correctly
 
+                elif status == 'sold':
+                    print(f"✅ {name} (ID#{tracker_id}) cleared — marked as sold")
                     already_alerted.add(tracker_id)
 
-                cv2.putText(display, "!! THEFT DETECTED !!",
-                            (100, 240),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            1.5, (0, 0, 255), 4)
+                else:
+                    print(f"ℹ️ {name} (ID#{tracker_id}) not in database — ignored")
+                    already_alerted.add(tracker_id)
 
             object_zones[tracker_id] = current_zone
 
+            # Log detection every 30 frames
+            if frame_count % 30 == 0:
+                conf = tracked.confidence[i] if tracked.confidence is not None else 0.0
+                log_detection(
+                    object_names.get(tracker_id, 'object'),
+                    int(tracker_id),
+                    current_zone,
+                    float(conf),
+                    frame_count
+                )
+                total_detections += 1
 
-        # ── 5e. Clean up lost objects (no alert — just remove from registry) ──
+        # ── Clean up lost objects ─────────────────────────────────────────
         for obj_id, last_frame in list(object_last_seen.items()):
             if frame_count - last_frame > DISAPPEARANCE_THRESHOLD:
                 del object_last_seen[obj_id]
 
-        # ── 5f. Build labels ──────────────────────────────────────────────
+        # ── Build labels ──────────────────────────────────────────────────
         labels = []
         if tracked.tracker_id is not None:
             for i, tracker_id in enumerate(tracked.tracker_id):
-                name = object_names.get(tracker_id, 'object')
-                zone = object_zones.get(tracker_id, 'unknown')
-                conf = tracked.confidence[i] if tracked.confidence is not None else 0
+                name  = object_names.get(tracker_id, 'object')
+                zone  = object_zones.get(tracker_id, 'unknown')
+                conf  = tracked.confidence[i] if tracked.confidence is not None else 0
                 labels.append(f"{name} ID#{tracker_id} [{zone}]")
 
-        # ── 5g. Draw boxes and labels ─────────────────────────────────────
+        # ── Draw boxes and labels ─────────────────────────────────────────
         display = box_annotator.annotate(scene=display, detections=tracked)
-        display = label_annotator.annotate(
-            scene=display, detections=tracked, labels=labels
-        )
+        display = label_annotator.annotate(scene=display, detections=tracked, labels=labels)
 
-        # ── 5h. Show stats ────────────────────────────────────────────────
+        # ── Persistent alert banner ───────────────────────────────────────
+        if alert_active:
+            cv2.rectangle(display, (50, 180), (670, 270), (0, 0, 150), -1)
+            cv2.putText(display, alert_message,
+                        (60, 225),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.75, (255, 255, 255), 2)
+            cv2.putText(display, "Press 'A' to acknowledge",
+                        (180, 258),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.55, (0, 255, 255), 2)
+
+        # ── Stats ─────────────────────────────────────────────────────────
         cv2.putText(display, f"Objects: {len(tracked)}",
                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         cv2.putText(display, f"Alerts: {len(alert_log)}",
                     (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
         cv2.putText(display, f"Thefts: {len(theft_log)}",
                     (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                    
         cv2.putText(display, f"Frame: {frame_count}",
                     (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
-        # ── 5i. Display ───────────────────────────────────────────────────
+        # ── Display ───────────────────────────────────────────────────────
         cv2.imshow('Retail Vision - Virtual Fence', display)
 
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             break
         elif key == ord('s'):
-            screenshot_path = f"screenshot_frame_{frame_count}.jpg"
-            cv2.imwrite(screenshot_path, display)
-            print(f"Screenshot saved: {screenshot_path}")
+            path = f"screenshot_frame_{frame_count}.jpg"
+            cv2.imwrite(path, display)
+            print(f"Screenshot saved: {path}")
+        elif key == ord('a') or key == ord('A'):
+            stop_alarm()
+            print("✅ Alert acknowledged by operator")
 
-    # ── 6. Cleanup ────────────────────────────────────────────────────────
+    # ── Cleanup ───────────────────────────────────────────────────────────
+    stop_alarm()
     cap.release()
     cv2.destroyAllWindows()
+    end_session(session_id, frame_count, total_detections, len(theft_log))
 
-    # ── 7. Final summary ──────────────────────────────────────────────────
+    # ── Summary ───────────────────────────────────────────────────────────
     print("\n" + "=" * 50)
     print("SESSION SUMMARY")
     print("=" * 50)
-    print(f"Total frames: {frame_count}")
-    print(f"Total alerts: {len(alert_log)}")
-    print(f"Total thefts detected: {len(theft_log)}")
-
+    print(f"Total frames:  {frame_count}")
+    print(f"Total alerts:  {len(alert_log)}")
+    print(f"Total thefts:  {len(theft_log)}")
     if theft_log:
         print("\nTheft Log:")
         for t in theft_log:
             print(f"  [{t['time']}] {t['name']} ID#{t['id']} — STOLEN")
-
-    if alert_log:
-        print("\nAlert Log:")
-        for a in alert_log:
-            print(f"  [{a['time']}] {a['name']} ID#{a['id']} removed")
     print("=" * 50)
 
 if __name__ == '__main__':
