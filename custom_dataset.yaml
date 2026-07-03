@@ -1,12 +1,12 @@
 train:
-  - custom_dataset/images/cola_next/train/images
-  - custom_dataset/images/oreo/train/images
+  - C:/Users/daudr/OneDrive/Documents/VS code new projects/Real Time Vision Intelligence for Autonomous Retail/custom_dataset/images/cola_next/train/images
+  - C:/Users/daudr/OneDrive/Documents/VS code new projects/Real Time Vision Intelligence for Autonomous Retail/custom_dataset/images/oreo/train/images
 val:
-  - custom_dataset/images/cola_next/valid/images
-  - custom_dataset/images/oreo/valid/images
+  - C:/Users/daudr/OneDrive/Documents/VS code new projects/Real Time Vision Intelligence for Autonomous Retail/custom_dataset/images/cola_next/valid/images
+  - C:/Users/daudr/OneDrive/Documents/VS code new projects/Real Time Vision Intelligence for Autonomous Retail/custom_dataset/images/oreo/valid/images
 test:
-  - custom_dataset/images/cola_next/test/images
-  - custom_dataset/images/oreo/test/images
+  - C:/Users/daudr/OneDrive/Documents/VS code new projects/Real Time Vision Intelligence for Autonomous Retail/custom_dataset/images/cola_next/test/images
+  - C:/Users/daudr/OneDrive/Documents/VS code new projects/Real Time Vision Intelligence for Autonomous Retail/custom_dataset/images/oreo/test/images
 
 nc: 34
 names: ['Annar-Next-1.5L-bottle', 'Annar-Next-1L-bottle', 'Annar-Next-300ML-bottle', 'Apple-Next-300ML-bottle', 'Cola-Next-1.5L-bottle', 'Cola-Next-1L-bottle', 'Cola-Next-2.25L-bottle', 'Cola-Next-250ML-Tin', 'Cola-Next-300ML-bottle', 'Cola-Next-500ML-bottle', 'Cola-Next-Zero-Sugar-250ML-Tin', 'Dare-Next-1.5L-bottle', 'Dare-Next-1L-bottle', 'Dare-Next-2.25L-bottle', 'Dare-Next-250ML-Tin', 'Dare-Next-300ML-bottle', 'Dare-Next-500ML-bottle', 'Fizup-Next-1.5L-bottle', 'Fizup-Next-1L-bottle', 'Fizup-Next-2.25L-bottle', 'Fizup-Next-250ML-Tin', 'Fizup-Next-300ML-bottle', 'Fizup-Next-500ML-bottle', 'Fizup-Next-Zero-Sugar-250ML-Tin', 'Lychee-Next-300ML-bottle', 'Rango-Next-1.5L-bottle', 'Rango-Next-1L-bottle', 'Rango-Next-250ML-Tin', 'Rango-Next-300ML-bottle', 'Storm-Next-300ML-bottle', 'Strom-Next-250ML-Tin', 'Water-Next-1.5L-bottle', 'Water-Next-500ML-bottle', 'Oreo-biscuit']
